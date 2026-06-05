@@ -1,0 +1,41 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.ipynb_checkpoints/
+
+# Python/tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+
+# Local model and training artifacts (large/binary)
+artifacts/models/*
+!artifacts/models/.gitkeep
+artifacts/checkpoints/*
+!artifacts/checkpoints/.gitkeep
+
+# Generated reports and logs
+artifacts/reports/*.json
+artifacts/reports/*.tmp
+artifacts/reports/*.log
+!artifacts/reports/.gitkeep
+
+# Notebook runtime outputs/checkpoints
+notebooks/**/*.nbconvert.*
+
+# Optional local datasets and archives
+data/raw/*.zip
+data/raw/*.tar
+data/raw/*.gz
+data/processed/*.jsonl
+
+# Keep secrets/tokens local only
+*.pem
+*.key
+*.p12
+*.pfx

@@ -1,0 +1,11 @@
+pydantic>=2.8.0
+python-dotenv>=1.0.1
+transformers>=4.41.0
+torch>=2.2.0
+accelerate>=0.30.0
+peft>=0.11.0
+datasets>=2.20.0
+bitsandbytes>=0.43.0
+streamlit>=1.36.0
+pandas>=2.2.0
+plotly>=5.22.0

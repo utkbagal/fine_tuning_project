@@ -1,0 +1,23 @@
+{
+  "run_id": "20260604_134509_266250",
+  "run_name": "exp_20260604_134509_266250",
+  "base_model_id": "google/gemma-3-4b-it",
+  "data_version": "v1.0",
+  "train_file": "C:\\Users\\2000110656\\projects\\capstone1\\project\\data\\raw\\train.jsonl",
+  "eval_file": "C:\\Users\\2000110656\\projects\\capstone1\\project\\data\\raw\\eval.jsonl",
+  "created_at": "2026-06-04T13:45:09.995680+00:00",
+  "trainer": "qlora_peft_trl",
+  "notes": "bootstrap test run",
+  "hyperparameters": {
+    "rank": 16,
+    "alpha": 32,
+    "target_modules": [
+      "q_proj",
+      "v_proj"
+    ],
+    "learning_rate": 0.0002,
+    "epochs": 2,
+    "batch_size": 4,
+    "gradient_accumulation_steps": 16
+  }
+}
