@@ -4,33 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 import os
-import sys
-import types
-
-
-def _ensure_triton_ops_stub() -> None:
-    """Stub out triton.ops if the submodule is missing.
-
-    triton 3.x removed the ops submodule, but bitsandbytes still imports from
-    it at import time. Inserting an empty stub into sys.modules before any
-    bitsandbytes/peft/transformers import prevents the ModuleNotFoundError
-    without affecting any real functionality.
-    """
-    if "triton.ops" in sys.modules:
-        return
-    try:
-        import triton  # noqa: F401
-        stub = types.ModuleType("triton.ops")
-        sys.modules["triton.ops"] = stub
-        # Also attach as attribute so 'import triton; triton.ops' works.
-        if not hasattr(triton, "ops"):
-            triton.ops = stub  # type: ignore[attr-defined]
-    except ImportError:
-        pass  # triton not installed at all — nothing to stub
+from src.common.runtime_compat import ensure_triton_compat
 
 
 # Apply stub at module-load time so it fires before any heavy import below.
-_ensure_triton_ops_stub()
+ensure_triton_compat()
 
 
 def _load_causal_lm(*, model_id: str, token: str | None, local_files_only: bool, torch_mod) -> object:
@@ -98,7 +76,7 @@ class HuggingFaceBackend:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        _ensure_triton_ops_stub()
+        ensure_triton_compat()
         self._model = _load_causal_lm(
             model_id=self.model_id,
             token=self.hf_token or None,
@@ -163,7 +141,7 @@ class HuggingFacePeftBackend:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        _ensure_triton_ops_stub()
+        ensure_triton_compat()
         base_model = _load_causal_lm(
             model_id=self.model_id,
             token=self.hf_token or None,
