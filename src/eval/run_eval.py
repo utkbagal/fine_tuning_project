@@ -46,6 +46,7 @@ def evaluate(
     per_record_outputs: list[dict[str, Any]] = []
 
     for row in rows:
+        print(f"Evaluating record id: {row.get('id', 'unknown')}...")
         prompt = build_prompt(row)
         results = router.run_all_with_timings(prompt)
 
