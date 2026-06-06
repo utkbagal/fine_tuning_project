@@ -89,7 +89,20 @@ def _run_training(
         )
         return metrics
 
-    # Lazy imports so dry-run works without heavyweight dependencies.
+    # Stub triton.ops before importing bitsandbytes/transformers to prevent
+    # ModuleNotFoundError on triton 3.x which removed the ops submodule.
+    import sys as _sys
+    import types as _types
+    if "triton.ops" not in _sys.modules:
+        try:
+            import triton as _triton
+            _stub = _types.ModuleType("triton.ops")
+            _sys.modules["triton.ops"] = _stub
+            if not hasattr(_triton, "ops"):
+                _triton.ops = _stub  # type: ignore[attr-defined]
+        except ImportError:
+            pass
+
     import torch
     from datasets import Dataset
     from peft import LoraConfig, get_peft_model
