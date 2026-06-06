@@ -4,51 +4,47 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 import os
+import sys
+import types
 
 
-def _load_causal_lm_with_runtime_fallback(
-    *,
-    model_id: str,
-    token: str | None,
-    local_files_only: bool,
-    torch_mod,
-):
-    """Load a causal LM while handling common Colab dependency mismatches.
+def _ensure_triton_ops_stub() -> None:
+    """Stub out triton.ops if the submodule is missing.
 
-    First attempt uses device_map='auto' for convenience. If runtime dependency
-    issues arise (e.g., triton/bitsandbytes/torchao import mismatch), retry
-    without accelerate path and place model directly on cuda/cpu.
+    triton 3.x removed the ops submodule, but bitsandbytes still imports from
+    it at import time. Inserting an empty stub into sys.modules before any
+    bitsandbytes/peft/transformers import prevents the ModuleNotFoundError
+    without affecting any real functionality.
     """
+    if "triton.ops" in sys.modules:
+        return
+    try:
+        import triton  # noqa: F401
+        stub = types.ModuleType("triton.ops")
+        sys.modules["triton.ops"] = stub
+        # Also attach as attribute so 'import triton; triton.ops' works.
+        if not hasattr(triton, "ops"):
+            triton.ops = stub  # type: ignore[attr-defined]
+    except ImportError:
+        pass  # triton not installed at all — nothing to stub
+
+
+# Apply stub at module-load time so it fires before any heavy import below.
+_ensure_triton_ops_stub()
+
+
+def _load_causal_lm(*, model_id: str, token: str | None, local_files_only: bool, torch_mod) -> object:
+    """Load a causal LM with device_map='auto', placed on CUDA/CPU."""
     from transformers import AutoModelForCausalLM
 
     dtype = torch_mod.float16 if torch_mod.cuda.is_available() else torch_mod.float32
-
-    try:
-        return AutoModelForCausalLM.from_pretrained(
-            model_id,
-            token=token,
-            local_files_only=local_files_only,
-            dtype=dtype,
-            device_map="auto",
-        )
-    except Exception as exc:
-        detail = str(exc).lower()
-        dependency_mismatch = (
-            "triton.ops" in detail
-            or "torchao" in detail
-            or "bitsandbytes" in detail
-        )
-        if not dependency_mismatch:
-            raise
-
-    model = AutoModelForCausalLM.from_pretrained(
+    return AutoModelForCausalLM.from_pretrained(
         model_id,
         token=token,
         local_files_only=local_files_only,
         dtype=dtype,
+        device_map="auto",
     )
-    device = "cuda" if torch_mod.cuda.is_available() else "cpu"
-    return model.to(device)
 
 
 class TextGenerationBackend(Protocol):
@@ -102,17 +98,13 @@ class HuggingFaceBackend:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        # Retry path for Colab dependency drift (triton/bitsandbytes/torchao).
-        try:
-            self._model = _load_causal_lm_with_runtime_fallback(
-                model_id=self.model_id,
-                token=self.hf_token or None,
-                local_files_only=self.local_files_only,
-                torch_mod=torch,
-            )
-        except Exception:
-            # Preserve existing behavior and error surfacing if fallback cannot load.
-            raise
+        _ensure_triton_ops_stub()
+        self._model = _load_causal_lm(
+            model_id=self.model_id,
+            token=self.hf_token or None,
+            local_files_only=self.local_files_only,
+            torch_mod=torch,
+        )
 
     def generate(self, prompt: str, max_new_tokens: int = 384) -> str:
         messages = [
@@ -171,7 +163,8 @@ class HuggingFacePeftBackend:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        base_model = _load_causal_lm_with_runtime_fallback(
+        _ensure_triton_ops_stub()
+        base_model = _load_causal_lm(
             model_id=self.model_id,
             token=self.hf_token or None,
             local_files_only=self.local_files_only,
@@ -325,11 +318,7 @@ def create_fine_tuned_backend(
                 " | Fix: upgrade torchao in the runtime (pip install -U 'torchao>=0.16.0') "
                 "or uninstall it if unused (pip uninstall -y torchao), then restart runtime"
             )
-        if "triton.ops" in details.lower():
-            details += (
-                " | Fix: restart runtime and reinstall deps; if needed run: "
-                "pip uninstall -y bitsandbytes torchao && pip install -r requirements.txt"
-            )
+
         return MessageBackend(
             message=(
                 "Fine-tuned backend failed to load adapter with any base-model source. "
