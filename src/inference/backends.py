@@ -6,6 +6,51 @@ from typing import Protocol
 import os
 
 
+def _load_causal_lm_with_runtime_fallback(
+    *,
+    model_id: str,
+    token: str | None,
+    local_files_only: bool,
+    torch_mod,
+):
+    """Load a causal LM while handling common Colab dependency mismatches.
+
+    First attempt uses device_map='auto' for convenience. If runtime dependency
+    issues arise (e.g., triton/bitsandbytes/torchao import mismatch), retry
+    without accelerate path and place model directly on cuda/cpu.
+    """
+    from transformers import AutoModelForCausalLM
+
+    dtype = torch_mod.float16 if torch_mod.cuda.is_available() else torch_mod.float32
+
+    try:
+        return AutoModelForCausalLM.from_pretrained(
+            model_id,
+            token=token,
+            local_files_only=local_files_only,
+            dtype=dtype,
+            device_map="auto",
+        )
+    except Exception as exc:
+        detail = str(exc).lower()
+        dependency_mismatch = (
+            "triton.ops" in detail
+            or "torchao" in detail
+            or "bitsandbytes" in detail
+        )
+        if not dependency_mismatch:
+            raise
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        token=token,
+        local_files_only=local_files_only,
+        dtype=dtype,
+    )
+    device = "cuda" if torch_mod.cuda.is_available() else "cpu"
+    return model.to(device)
+
+
 class TextGenerationBackend(Protocol):
     def generate(self, prompt: str, max_new_tokens: int = 384) -> str:
         ...
@@ -41,7 +86,7 @@ class HuggingFaceBackend:
     def __post_init__(self) -> None:
         try:
             import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoTokenizer
         except ImportError as exc:
             raise RuntimeError(
                 "Hugging Face backend requires transformers and torch. "
@@ -57,13 +102,17 @@ class HuggingFaceBackend:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        self._model = AutoModelForCausalLM.from_pretrained(
-            self.model_id,
-            token=self.hf_token or None,
-            local_files_only=self.local_files_only,
-            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
-        )
+        # Retry path for Colab dependency drift (triton/bitsandbytes/torchao).
+        try:
+            self._model = _load_causal_lm_with_runtime_fallback(
+                model_id=self.model_id,
+                token=self.hf_token or None,
+                local_files_only=self.local_files_only,
+                torch_mod=torch,
+            )
+        except Exception:
+            # Preserve existing behavior and error surfacing if fallback cannot load.
+            raise
 
     def generate(self, prompt: str, max_new_tokens: int = 384) -> str:
         messages = [
@@ -106,7 +155,7 @@ class HuggingFacePeftBackend:
         try:
             import torch
             from peft import PeftModel
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoTokenizer
         except ImportError as exc:
             raise RuntimeError(
                 "PEFT backend requires transformers, torch, and peft. "
@@ -122,12 +171,11 @@ class HuggingFacePeftBackend:
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        base_model = AutoModelForCausalLM.from_pretrained(
-            self.model_id,
+        base_model = _load_causal_lm_with_runtime_fallback(
+            model_id=self.model_id,
             token=self.hf_token or None,
             local_files_only=self.local_files_only,
-            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
+            torch_mod=torch,
         )
         self._model = PeftModel.from_pretrained(base_model, str(adapter_dir))
 
@@ -276,6 +324,11 @@ def create_fine_tuned_backend(
             details += (
                 " | Fix: upgrade torchao in the runtime (pip install -U 'torchao>=0.16.0') "
                 "or uninstall it if unused (pip uninstall -y torchao), then restart runtime"
+            )
+        if "triton.ops" in details.lower():
+            details += (
+                " | Fix: restart runtime and reinstall deps; if needed run: "
+                "pip uninstall -y bitsandbytes torchao && pip install -r requirements.txt"
             )
         return MessageBackend(
             message=(
