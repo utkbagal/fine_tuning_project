@@ -61,7 +61,7 @@ class HuggingFaceBackend:
             self.model_id,
             token=self.hf_token or None,
             local_files_only=self.local_files_only,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="auto",
         )
 
@@ -126,7 +126,7 @@ class HuggingFacePeftBackend:
             self.model_id,
             token=self.hf_token or None,
             local_files_only=self.local_files_only,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="auto",
         )
         self._model = PeftModel.from_pretrained(base_model, str(adapter_dir))
