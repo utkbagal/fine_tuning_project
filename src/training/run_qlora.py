@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from src.config.settings import load_settings
+from src.common.runtime_compat import ensure_triton_compat
 from src.data.io_jsonl import read_jsonl, write_json
 from src.training.formatting import build_training_text
 from src.training.models import TrainingRunConfig
@@ -89,19 +90,7 @@ def _run_training(
         )
         return metrics
 
-    # Stub triton.ops before importing bitsandbytes/transformers to prevent
-    # ModuleNotFoundError on triton 3.x which removed the ops submodule.
-    import sys as _sys
-    import types as _types
-    if "triton.ops" not in _sys.modules:
-        try:
-            import triton as _triton
-            _stub = _types.ModuleType("triton.ops")
-            _sys.modules["triton.ops"] = _stub
-            if not hasattr(_triton, "ops"):
-                _triton.ops = _stub  # type: ignore[attr-defined]
-        except ImportError:
-            pass
+    ensure_triton_compat()
 
     import torch
     from datasets import Dataset
