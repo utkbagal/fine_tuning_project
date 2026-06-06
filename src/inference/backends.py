@@ -272,6 +272,11 @@ def create_fine_tuned_backend(
 
     if primary is None:
         details = " | ".join(errors) if errors else "no load attempts succeeded"
+        if "torchao" in details.lower() and "incompatible version" in details.lower():
+            details += (
+                " | Fix: upgrade torchao in the runtime (pip install -U 'torchao>=0.16.0') "
+                "or uninstall it if unused (pip uninstall -y torchao), then restart runtime"
+            )
         return MessageBackend(
             message=(
                 "Fine-tuned backend failed to load adapter with any base-model source. "
