@@ -254,6 +254,66 @@ def _load_adapter_manifest(adapter_path: str) -> dict:
     return {}
 
 
+def _list_saved_reports(reports_dir: Path) -> list[Path]:
+    # Include full, generic, and golden variant reports; newest first.
+    patterns = [
+        "variant_eval_report*.json",
+    ]
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in patterns:
+        for p in reports_dir.glob(pattern):
+            if p.is_file() and p not in seen:
+                files.append(p)
+                seen.add(p)
+    files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    return files
+
+
+def _render_previous_run_panel(settings) -> None:
+    st.markdown('<hr class="sec-divider">', unsafe_allow_html=True)
+    st.markdown("### Previous Comparison Runs")
+
+    report_files = _list_saved_reports(settings.reports_dir)
+    if not report_files:
+        st.info("No saved comparison reports found yet. Run an eval once to populate this list.")
+        return
+
+    label_to_path: dict[str, Path] = {}
+    for p in report_files:
+        ts = p.stat().st_mtime
+        label = f"{p.name}  ({pd.to_datetime(ts, unit='s').strftime('%Y-%m-%d %H:%M:%S')})"
+        label_to_path[label] = p
+
+    col_sel, col_btn = st.columns([4, 1])
+    with col_sel:
+        selected_label = st.selectbox(
+            "Select saved report",
+            options=list(label_to_path.keys()),
+            key="previous_report_select",
+        )
+    with col_btn:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        load_previous = st.button("Load Report", use_container_width=True, key="load_previous_report")
+
+    if load_previous:
+        selected_path = label_to_path[selected_label]
+        try:
+            report = read_json(selected_path)
+        except Exception as exc:
+            st.error(f"Failed to read report: {selected_path} ({exc})")
+            return
+
+        if not isinstance(report, dict) or "aggregates" not in report:
+            st.error("Selected file does not look like a valid comparison report (missing 'aggregates').")
+            return
+
+        st.success(f"Loaded: {selected_path.name}")
+        _render_golden_results(report)
+        with st.expander("View loaded report JSON", expanded=False):
+            st.json(report)
+
+
 def _render_model_info(settings, adapter_path: str) -> None:
     manifest = _load_adapter_manifest(adapter_path)
     hp = manifest.get("hyperparameters", {})
@@ -448,6 +508,8 @@ def main() -> None:
     # variant legend
     legend = "".join(_badge_html(v) for v in VARIANT_COLORS)
     st.markdown(f'<div style="margin:12px 0 8px">{legend}</div>', unsafe_allow_html=True)
+
+    _render_previous_run_panel(settings)
 
     eval_path = settings.eval_file
     eval_rows: list[dict] = []
