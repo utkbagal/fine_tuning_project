@@ -7,6 +7,7 @@ from typing import Any
 from src.config.settings import load_settings
 from src.common.runtime_compat import ensure_triton_compat
 from src.data.io_jsonl import read_jsonl, write_json
+from src.inference.adapter_registry import resolve_latest_adapter
 from src.training.formatting import build_training_text
 from src.training.models import TrainingRunConfig
 from src.training.run_manager import TrainingRunManager
@@ -52,6 +53,44 @@ def _write_adapter_manifest(adapter_dir: Path, payload: dict[str, Any]) -> None:
     write_json(adapter_dir / "adapter_manifest.json", payload)
 
 
+def _normalize_resume_adapter_path(raw_path: str, project_root: Path) -> Path:
+    p = Path(raw_path).expanduser()
+    if not p.is_absolute():
+        p = (project_root / p).resolve()
+    return p
+
+
+def _resolve_resume_adapter_path(
+    *,
+    resume_from_latest: bool,
+    resume_from_adapter: str | None,
+    models_dir: Path,
+    project_root: Path,
+) -> Path | None:
+    if not resume_from_latest and not resume_from_adapter:
+        return None
+
+    if resume_from_latest:
+        latest = resolve_latest_adapter(models_dir)
+        if not latest:
+            raise FileNotFoundError(
+                "--resume-from-latest was requested, but no latest adapter was found."
+            )
+        resume_path = Path(latest)
+    else:
+        resume_path = _normalize_resume_adapter_path(str(resume_from_adapter), project_root)
+
+    if not resume_path.exists() or not resume_path.is_dir():
+        raise FileNotFoundError(f"Resume adapter path not found: {resume_path}")
+
+    if not (resume_path / "adapter_config.json").exists():
+        raise FileNotFoundError(
+            f"Resume adapter is invalid (missing adapter_config.json): {resume_path}"
+        )
+
+    return resume_path
+
+
 def _run_training(
     config: TrainingRunConfig,
     run_manager: TrainingRunManager,
@@ -59,6 +98,7 @@ def _run_training(
     max_train_samples: int | None,
     hf_token: str,
     local_files_only: bool,
+    resume_adapter_path: Path | None,
 ) -> dict[str, Any]:
     train_rows = read_jsonl(Path(config.train_file))
     eval_rows = read_jsonl(Path(config.eval_file))
@@ -75,6 +115,7 @@ def _run_training(
         "eval_rows": len(prepared_eval),
         "base_model_id": config.base_model_id,
         "hyperparameters": config.to_dict()["hyperparameters"],
+        "resume_from_adapter": str(resume_adapter_path) if resume_adapter_path else "",
     }
 
     if not execute_training:
@@ -94,7 +135,7 @@ def _run_training(
 
     import torch
     from datasets import Dataset
-    from peft import LoraConfig, get_peft_model
+    from peft import LoraConfig, PeftModel, get_peft_model
     from transformers import (
         AutoModelForCausalLM,
         AutoTokenizer,
@@ -131,19 +172,23 @@ def _run_training(
         quantization_config=quantization_config,
     )
 
-    resolved_target_modules = _resolve_target_modules(model, config.hyperparameters.target_modules)
-    metrics["resolved_target_modules"] = list(resolved_target_modules)
-    print("LoRA target modules:", ", ".join(resolved_target_modules))
+    if resume_adapter_path is not None:
+        print(f"Resuming LoRA training from adapter: {resume_adapter_path}")
+        model = PeftModel.from_pretrained(model, str(resume_adapter_path), is_trainable=True)
+    else:
+        resolved_target_modules = _resolve_target_modules(model, config.hyperparameters.target_modules)
+        metrics["resolved_target_modules"] = list(resolved_target_modules)
+        print("LoRA target modules:", ", ".join(resolved_target_modules))
 
-    lora_cfg = LoraConfig(
-        r=config.hyperparameters.rank,
-        lora_alpha=config.hyperparameters.alpha,
-        target_modules=list(resolved_target_modules),
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    model = get_peft_model(model, lora_cfg)
+        lora_cfg = LoraConfig(
+            r=config.hyperparameters.rank,
+            lora_alpha=config.hyperparameters.alpha,
+            target_modules=list(resolved_target_modules),
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, lora_cfg)
 
     train_ds = Dataset.from_list(prepared_train)
     eval_ds = Dataset.from_list(prepared_eval)
@@ -199,6 +244,24 @@ def main() -> None:
         help="Execute actual training. Without this flag, script performs dry-run and writes placeholder adapter artifacts.",
     )
     parser.add_argument("--max-train-samples", type=int, default=None, help="Optional cap for training rows")
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Optional epoch override (e.g., 2-4) for this run.",
+    )
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--resume-from-latest",
+        action="store_true",
+        help="Resume training from artifacts/models/latest adapter weights.",
+    )
+    resume_group.add_argument(
+        "--resume-from-adapter",
+        type=str,
+        default=None,
+        help="Resume training from a specific adapter folder (absolute or project-relative path).",
+    )
     args = parser.parse_args()
 
     settings = load_settings()
@@ -208,6 +271,13 @@ def main() -> None:
         reports_dir=settings.reports_dir,
     )
 
+    resume_adapter_path = _resolve_resume_adapter_path(
+        resume_from_latest=args.resume_from_latest,
+        resume_from_adapter=args.resume_from_adapter,
+        models_dir=settings.models_dir,
+        project_root=settings.project_root,
+    )
+
     config = TrainingRunConfig.new(
         base_model_id=settings.model_source,
         data_version=settings.data_version,
@@ -215,6 +285,12 @@ def main() -> None:
         eval_file=settings.eval_file,
         notes=args.notes,
     )
+
+    if args.epochs is not None:
+        if args.epochs < 1:
+            raise ValueError("--epochs must be >= 1")
+        config.hyperparameters.epochs = args.epochs
+
     manager.bootstrap(config)
 
     try:
@@ -226,6 +302,7 @@ def main() -> None:
             max_train_samples=args.max_train_samples,
             hf_token=settings.hf_token,
             local_files_only=settings.hf_local_files_only,
+            resume_adapter_path=resume_adapter_path,
         )
         manager.update_state(config.run_id, settings.reports_dir, status="completed", metrics=metrics)
         latest_dir = manager.promote_latest_adapter(config.run_id)
@@ -235,6 +312,8 @@ def main() -> None:
 
     print(f"Run completed: {config.run_id}")
     print(f"Mode: {'execute' if args.execute_training else 'dry_run'}")
+    if resume_adapter_path is not None:
+        print(f"Resumed from adapter: {resume_adapter_path}")
     print(f"Latest adapter path: {latest_dir}")
 
 
