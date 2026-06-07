@@ -72,18 +72,21 @@ class TrainingRunManager:
         latest_dir = (self.models_dir / "latest").resolve()
         latest_meta = self.models_dir / "latest.json"
 
-        if latest_dir.exists() or latest_dir.is_symlink():
-            if latest_dir.is_symlink() or latest_dir.is_file():
-                latest_dir.unlink()
-            else:
-                shutil.rmtree(latest_dir)
-
-        # Symlink can fail on some Windows environments; fallback to directory copy.
+        # Symlink can fail on Drive/Windows; fallback to directory copy.
+        # Cleanup is done inside the try so that if rmtree also fails (e.g. Drive
+        # Errno 95), copytree can still succeed via dirs_exist_ok=True.
         try:
+            if latest_dir.exists() or latest_dir.is_symlink():
+                if latest_dir.is_symlink() or latest_dir.is_file():
+                    latest_dir.unlink()
+                else:
+                    shutil.rmtree(latest_dir)
             latest_dir.symlink_to(source_dir, target_is_directory=True)
             mode = "symlink"
         except OSError:
-            shutil.copytree(source_dir, latest_dir)
+            # dirs_exist_ok=True lets copytree overwrite an existing latest dir
+            # without requiring a prior successful rmtree (critical for Drive FUSE).
+            shutil.copytree(source_dir, latest_dir, dirs_exist_ok=True)
             mode = "copy"
 
         write_json(
