@@ -69,7 +69,7 @@ class TrainingRunManager:
         if not source_dir.exists():
             raise FileNotFoundError(f"Adapter output does not exist: {source_dir}")
 
-        latest_dir = (self.models_dir / "latest").resolve()
+        latest_dir = self.models_dir / "latest"
         latest_meta = self.models_dir / "latest.json"
 
         # Symlink can fail on Drive/Windows; fallback to directory copy.
