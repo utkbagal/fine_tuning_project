@@ -63,6 +63,21 @@ class TrainingRunManager:
 
         write_json(state_file, payload)
 
+    def _remove_path(self, path: Path) -> None:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.exists():
+            shutil.rmtree(path)
+
+    def _copy_dir_contents(self, source_dir: Path, target_dir: Path) -> None:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for entry in source_dir.iterdir():
+            destination = target_dir / entry.name
+            if entry.is_dir():
+                shutil.copytree(entry, destination, dirs_exist_ok=True)
+            else:
+                shutil.copy2(entry, destination)
+
     def promote_latest_adapter(self, run_id: str) -> Path:
         run_state = self.load_state(run_id)
         source_dir = Path(run_state["adapter_output_dir"]).resolve()
@@ -73,20 +88,37 @@ class TrainingRunManager:
         latest_meta = self.models_dir / "latest.json"
 
         # Symlink can fail on Drive/Windows; fallback to directory copy.
-        # Cleanup is done inside the try so that if rmtree also fails (e.g. Drive
-        # Errno 95), copytree can still succeed via dirs_exist_ok=True.
         try:
             if latest_dir.exists() or latest_dir.is_symlink():
-                if latest_dir.is_symlink() or latest_dir.is_file():
-                    latest_dir.unlink()
-                else:
-                    shutil.rmtree(latest_dir)
+                self._remove_path(latest_dir)
             latest_dir.symlink_to(source_dir, target_is_directory=True)
             mode = "symlink"
         except OSError:
-            # dirs_exist_ok=True lets copytree overwrite an existing latest dir
-            # without requiring a prior successful rmtree (critical for Drive FUSE).
-            shutil.copytree(source_dir, latest_dir, dirs_exist_ok=True)
+            # If latest accidentally resolves to source, do not self-copy.
+            try:
+                if latest_dir.exists() and latest_dir.resolve() == source_dir:
+                    mode = "source"
+                    write_json(
+                        latest_meta,
+                        {
+                            "run_id": run_id,
+                            "source_dir": str(source_dir),
+                            "latest_dir": str(source_dir),
+                            "mode": mode,
+                            "updated_at": utc_now_iso(),
+                        },
+                    )
+                    return source_dir
+            except OSError:
+                pass
+
+            if latest_dir.exists() or latest_dir.is_symlink():
+                try:
+                    self._remove_path(latest_dir)
+                except OSError:
+                    # If removal is unsupported by Drive, keep directory and overwrite files.
+                    pass
+            self._copy_dir_contents(source_dir, latest_dir)
             mode = "copy"
 
         write_json(
